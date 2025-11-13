@@ -32,9 +32,13 @@ SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
 EMAIL_ADDRESS = os.getenv('EMAIL_ADDRESS')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
+ADMIN_EMAIL = os.getenv('ADMIN_EMAIL', EMAIL_ADDRESS)  # Admin notification email
 CAFE_NAME = os.getenv('CAFE_NAME', 'Café Fausse')
 CAFE_PHONE = os.getenv('CAFE_PHONE', '(202) 555-4567')
 CAFE_ADDRESS = os.getenv('CAFE_ADDRESS', '123 Quantum Street, Digital District')
+
+# In-memory storage for admin notifications (consider Redis for production)
+recent_notifications = []
 
 def get_db_connection():
     """Create and return a database connection"""
@@ -137,6 +141,42 @@ def create_tables():
             print("➡️ Adding 'special_requests' column to reservations table...")
             cur.execute('ALTER TABLE reservations ADD COLUMN special_requests TEXT;')
             print("✅ Added 'special_requests' column to reservations table!")
+        
+        # Check if status column exists in reservations table, if not add it
+        cur.execute('''
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='reservations' and column_name='status'
+        ''')
+        
+        if not cur.fetchone():
+            print("➡️ Adding 'status' column to reservations table...")
+            cur.execute("ALTER TABLE reservations ADD COLUMN status VARCHAR(20) DEFAULT 'pending';")
+            print("✅ Added 'status' column to reservations table!")
+        
+        # Check if fulfilled_at column exists in reservations table, if not add it
+        cur.execute('''
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='reservations' and column_name='fulfilled_at'
+        ''')
+        
+        if not cur.fetchone():
+            print("➡️ Adding 'fulfilled_at' column to reservations table...")
+            cur.execute('ALTER TABLE reservations ADD COLUMN fulfilled_at TIMESTAMP;')
+            print("✅ Added 'fulfilled_at' column to reservations table!")
+        
+        # Check if revenue column exists in reservations table, if not add it
+        cur.execute('''
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='reservations' and column_name='revenue'
+        ''')
+        
+        if not cur.fetchone():
+            print("➡️ Adding 'revenue' column to reservations table...")
+            cur.execute('ALTER TABLE reservations ADD COLUMN revenue DECIMAL(10, 2);')
+            print("✅ Added 'revenue' column to reservations table!")
         
         conn.commit()
         print("✅ Database tables are ready!")
@@ -383,6 +423,155 @@ def send_booking_confirmation(customer_name, customer_email, booking_details):
         print(f"❌ Failed to send email: {e}")
         return False
 
+def send_admin_notification(booking_details, customer_details):
+    """Send email notification to admin about new reservation"""
+    if not ADMIN_EMAIL or not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+        print("⚠️ Admin email not configured, skipping admin notification")
+        return False
+    
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"🔔 New Reservation - {CAFE_NAME}"
+        msg['From'] = EMAIL_ADDRESS
+        msg['To'] = ADMIN_EMAIL
+
+        # HTML content for admin
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }}
+                .container {{ max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; padding: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; margin-bottom: 20px; }}
+                .alert {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 5px; }}
+                .details {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 15px 0; }}
+                .detail-row {{ padding: 10px 0; border-bottom: 1px solid #e0e0e0; }}
+                .detail-row:last-child {{ border-bottom: none; }}
+                .label {{ font-weight: bold; color: #764ba2; min-width: 150px; display: inline-block; }}
+                .value {{ color: #333; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1 style="margin: 0;">🔔 New Reservation Alert</h1>
+                    <p style="margin: 10px 0 0 0;">A new reservation has been made</p>
+                </div>
+
+                <div class="alert">
+                    <strong>⏰ Action Required:</strong> New reservation needs your attention
+                </div>
+
+                <div class="details">
+                    <h3 style="margin-top: 0; color: #764ba2;">👤 Customer Information</h3>
+                    <div class="detail-row">
+                        <span class="label">Name:</span>
+                        <span class="value">{customer_details['name']}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Email:</span>
+                        <span class="value">{customer_details['email']}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">Phone:</span>
+                        <span class="value">{customer_details.get('phone', 'Not provided')}</span>
+                    </div>
+                </div>
+
+                <div class="details">
+                    <h3 style="margin-top: 0; color: #764ba2;">📋 Reservation Details</h3>
+                    <div class="detail-row">
+                        <span class="label">📅 Date & Time:</span>
+                        <span class="value">{booking_details['formatted_datetime']}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">🍽️ Table Number:</span>
+                        <span class="value">#{booking_details['table_number']}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">👥 Guests:</span>
+                        <span class="value">{booking_details['guests']}</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">🆔 Reservation ID:</span>
+                        <span class="value">#{booking_details['reservation_id']}</span>
+                    </div>
+                    {f'''
+                    <div class="detail-row">
+                        <span class="label">📝 Special Requests:</span>
+                        <span class="value">{booking_details['special_requests']}</span>
+                    </div>
+                    ''' if booking_details.get('special_requests') else ''}
+                </div>
+
+                <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0;">
+                    <p style="color: #666; margin: 0;">
+                        This is an automated notification from {CAFE_NAME}
+                    </p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        # Plain text version
+        text_content = f"""
+        🔔 NEW RESERVATION ALERT - {CAFE_NAME}
+        
+        A new reservation has been made!
+        
+        CUSTOMER INFORMATION:
+        Name: {customer_details['name']}
+        Email: {customer_details['email']}
+        Phone: {customer_details.get('phone', 'Not provided')}
+        
+        RESERVATION DETAILS:
+        Date & Time: {booking_details['formatted_datetime']}
+        Table Number: #{booking_details['table_number']}
+        Guests: {booking_details['guests']}
+        Reservation ID: #{booking_details['reservation_id']}
+        {f"Special Requests: {booking_details['special_requests']}" if booking_details.get('special_requests') else ''}
+        
+        ---
+        This is an automated notification from {CAFE_NAME}
+        """
+
+        # Attach parts
+        part1 = MIMEText(text_content, 'plain')
+        part2 = MIMEText(html_content, 'html')
+        
+        msg.attach(part1)
+        msg.attach(part2)
+
+        # Send email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"✅ Admin notification sent to {ADMIN_EMAIL}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to send admin notification: {e}")
+        return False
+
+def log_notification(notification_data):
+    """Store notification for admin portal display"""
+    global recent_notifications
+    
+    notification_data['timestamp'] = datetime.now().isoformat()
+    notification_data['id'] = len(recent_notifications) + 1
+    notification_data['read'] = False
+    
+    recent_notifications.append(notification_data)
+    
+    # Keep only last 100 notifications
+    if len(recent_notifications) > 100:
+        recent_notifications = recent_notifications[-100:]
+    
+    print(f"📝 Logged notification #{notification_data['id']} for admin portal")
+
 @app.route('/api/reservations', methods=['POST'])
 def create_reservation():
     data = request.get_json()
@@ -465,11 +654,39 @@ def create_reservation():
             'formatted_datetime': formatted_datetime,
             'special_requests': special_requests
         }
+        
+        customer_details = {
+            'name': name,
+            'email': email,
+            'phone': phone
+        }
 
-        # 7. Send confirmation email
+        # 7. Send confirmation email to customer
         email_sent = send_booking_confirmation(name, email, booking_details)
         
-        # 8. Prepare response message
+        # 8. Send notification to admin (email)
+        try:
+            admin_notified = send_admin_notification(booking_details, customer_details)
+        except Exception as e:
+            print(f"⚠️ Admin email notification failed: {e}")
+            admin_notified = False
+        
+        # 9. Log notification for admin portal
+        try:
+            log_notification({
+                'type': 'new_reservation',
+                'customer_name': name,
+                'customer_email': email,
+                'table_number': assigned_table,
+                'datetime': formatted_datetime,
+                'guests': guests,
+                'special_requests': special_requests,
+                'reservation_id': reservation_id
+            })
+        except Exception as e:
+            print(f"⚠️ Failed to log notification: {e}")
+        
+        # 10. Prepare response message
         confirmation_message = f'🎉 Your reservation for {guests} guests on {formatted_datetime} is confirmed!\n\n'
         confirmation_message += f'📋 Reservation Details:\n'
         confirmation_message += f'• Table Number: #{assigned_table}\n'
@@ -670,6 +887,105 @@ def get_all_bookings():
         if conn:
             conn.close()
 
+@app.route('/api/admin/bookings/upcoming', methods=['GET'])
+@require_auth
+def get_upcoming_bookings():
+    """Get today's and upcoming reservations for quick admin overview"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+
+    try:
+        cur = conn.cursor()
+        
+        # Get current time
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end = now + timedelta(days=7)
+        
+        # Get today's reservations
+        cur.execute('''
+            SELECT r.id, r.customer_id, r.time_slot, r.table_number, r.guests, r.special_requests, r.created_at,
+                   c.name, c.email, c.phone 
+            FROM reservations r 
+            JOIN customers c ON r.customer_id = c.id 
+            WHERE r.time_slot >= %s AND r.time_slot < %s
+            ORDER BY r.time_slot ASC
+        ''', (today_start, today_start + timedelta(days=1)))
+        
+        today_bookings = cur.fetchall()
+        
+        # Get next 7 days reservations (excluding today)
+        cur.execute('''
+            SELECT r.id, r.customer_id, r.time_slot, r.table_number, r.guests, r.special_requests, r.created_at,
+                   c.name, c.email, c.phone 
+            FROM reservations r 
+            JOIN customers c ON r.customer_id = c.id 
+            WHERE r.time_slot >= %s AND r.time_slot < %s
+            ORDER BY r.time_slot ASC
+        ''', (today_start + timedelta(days=1), week_end))
+        
+        upcoming_bookings = cur.fetchall()
+        
+        # Get reservations happening in next 2 hours
+        two_hours_from_now = now + timedelta(hours=2)
+        cur.execute('''
+            SELECT r.id, r.customer_id, r.time_slot, r.table_number, r.guests, r.special_requests, r.created_at,
+                   c.name, c.email, c.phone 
+            FROM reservations r 
+            JOIN customers c ON r.customer_id = c.id 
+            WHERE r.time_slot >= %s AND r.time_slot <= %s
+            ORDER BY r.time_slot ASC
+        ''', (now, two_hours_from_now))
+        
+        imminent_bookings = cur.fetchall()
+        
+        def format_booking(booking):
+            return {
+                'id': booking[0],
+                'customer_id': booking[1],
+                'time_slot': booking[2].isoformat() if hasattr(booking[2], 'isoformat') else str(booking[2]),
+                'table_number': booking[3],
+                'guests': booking[4],
+                'special_requests': booking[5],
+                'created_at': booking[6].isoformat() if hasattr(booking[6], 'isoformat') else str(booking[6]),
+                'name': booking[7],
+                'email': booking[8],
+                'phone': booking[9],
+                'is_soon': booking[2] <= two_hours_from_now if hasattr(booking[2], '__le__') else False
+            }
+        
+        return jsonify({
+            'success': True,
+            'today': {
+                'count': len(today_bookings),
+                'bookings': [format_booking(b) for b in today_bookings]
+            },
+            'upcoming': {
+                'count': len(upcoming_bookings),
+                'bookings': [format_booking(b) for b in upcoming_bookings[:10]]  # Limit to 10 for overview
+            },
+            'imminent': {
+                'count': len(imminent_bookings),
+                'bookings': [format_booking(b) for b in imminent_bookings]
+            },
+            'stats': {
+                'today_count': len(today_bookings),
+                'upcoming_week_count': len(upcoming_bookings),
+                'imminent_count': len(imminent_bookings),
+                'total_upcoming': len(today_bookings) + len(upcoming_bookings)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching upcoming bookings: {e}")
+        return jsonify({'error': 'Failed to fetch upcoming bookings'}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
 @app.route('/api/admin/subscribers', methods=['GET'])
 @require_auth
 def get_all_subscribers():
@@ -754,6 +1070,343 @@ def cancel_booking(booking_id):
         conn.rollback()
         print(f"Error cancelling booking: {e}")
         return jsonify({'error': 'Failed to cancel booking'}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+@app.route('/api/admin/notifications', methods=['GET'])
+@require_auth
+def get_notifications():
+    """Get all notifications for admin portal"""
+    global recent_notifications
+    
+    try:
+        # Sort by timestamp, most recent first
+        sorted_notifications = sorted(
+            recent_notifications, 
+            key=lambda x: x['timestamp'], 
+            reverse=True
+        )
+        
+        # Count unread notifications
+        unread_count = len([n for n in recent_notifications if not n['read']])
+        
+        return jsonify({
+            'success': True,
+            'notifications': sorted_notifications,
+            'unread_count': unread_count
+        })
+    except Exception as e:
+        print(f"❌ Error fetching notifications: {e}")
+        return jsonify({'error': 'Failed to fetch notifications'}), 500
+
+@app.route('/api/admin/notifications/<int:notification_id>/read', methods=['POST'])
+@require_auth
+def mark_notification_read(notification_id):
+    """Mark a notification as read"""
+    global recent_notifications
+    
+    try:
+        for notification in recent_notifications:
+            if notification['id'] == notification_id:
+                notification['read'] = True
+                print(f"✅ Marked notification #{notification_id} as read")
+                return jsonify({
+                    'success': True,
+                    'message': 'Notification marked as read'
+                })
+        
+        return jsonify({'error': 'Notification not found'}), 404
+    except Exception as e:
+        print(f"❌ Error marking notification as read: {e}")
+        return jsonify({'error': 'Failed to mark notification'}), 500
+
+@app.route('/api/admin/notifications/read-all', methods=['POST'])
+@require_auth
+def mark_all_notifications_read():
+    """Mark all notifications as read"""
+    global recent_notifications
+    
+    try:
+        for notification in recent_notifications:
+            notification['read'] = True
+        
+        print(f"✅ Marked all {len(recent_notifications)} notifications as read")
+        return jsonify({
+            'success': True,
+            'message': 'All notifications marked as read'
+        })
+    except Exception as e:
+        print(f"❌ Error marking all notifications as read: {e}")
+        return jsonify({'error': 'Failed to mark notifications'}), 500
+
+@app.route('/api/admin/bookings/<int:booking_id>/fulfill', methods=['POST'])
+@require_auth
+def fulfill_booking(booking_id):
+    """Mark a reservation as fulfilled with revenue amount"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+
+    try:
+        data = request.json
+        revenue = data.get('revenue')
+        
+        # Validate revenue
+        if revenue is None:
+            return jsonify({'error': 'Revenue amount is required'}), 400
+        
+        try:
+            revenue = float(revenue)
+            if revenue < 0:
+                return jsonify({'error': 'Revenue must be a positive number'}), 400
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid revenue amount'}), 400
+        
+        cur = conn.cursor()
+        
+        # Check if reservation exists
+        cur.execute('SELECT id, time_slot FROM reservations WHERE id = %s', (booking_id,))
+        reservation = cur.fetchone()
+        
+        if not reservation:
+            return jsonify({'error': 'Reservation not found'}), 404
+        
+        # Update reservation status
+        cur.execute('''
+            UPDATE reservations 
+            SET status = 'fulfilled', 
+                fulfilled_at = CURRENT_TIMESTAMP,
+                revenue = %s
+            WHERE id = %s
+        ''', (revenue, booking_id))
+        
+        conn.commit()
+        
+        print(f"✅ Reservation #{booking_id} marked as fulfilled with revenue ${revenue}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Reservation marked as fulfilled',
+            'booking_id': booking_id,
+            'revenue': revenue
+        })
+        
+    except Exception as e:
+        print(f"❌ Error fulfilling reservation: {e}")
+        conn.rollback()
+        return jsonify({'error': 'Failed to fulfill reservation'}), 500
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+@app.route('/api/admin/reports/dining', methods=['GET'])
+@require_auth
+def get_dining_report():
+    """Get comprehensive dining report with revenue analytics"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+
+    try:
+        cur = conn.cursor()
+        
+        # Get query parameters for date filtering
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        period = request.args.get('period', 'all')  # all, today, week, month, year
+        
+        # Calculate date range based on period
+        now = datetime.now()
+        
+        if period == 'today':
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        elif period == 'week':
+            start_date = now - timedelta(days=7)
+            end_date = now
+        elif period == 'month':
+            start_date = now - timedelta(days=30)
+            end_date = now
+        elif period == 'year':
+            start_date = now - timedelta(days=365)
+            end_date = now
+        elif start_date and end_date:
+            # Convert string dates to datetime
+            start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        else:
+            # All time - no date filter
+            start_date = None
+            end_date = None
+        
+        # Build WHERE clause
+        where_clause = ""
+        params = []
+        
+        if start_date and end_date:
+            where_clause = "WHERE r.time_slot >= %s AND r.time_slot <= %s"
+            params = [start_date, end_date]
+        
+        # Get overall statistics
+        cur.execute(f'''
+            SELECT 
+                COUNT(*) as total_reservations,
+                COUNT(CASE WHEN status = 'fulfilled' THEN 1 END) as fulfilled_count,
+                COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_count,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count,
+                COALESCE(SUM(CASE WHEN status = 'fulfilled' THEN revenue END), 0) as total_revenue,
+                COALESCE(AVG(CASE WHEN status = 'fulfilled' THEN revenue END), 0) as average_revenue,
+                COALESCE(MAX(CASE WHEN status = 'fulfilled' THEN revenue END), 0) as highest_revenue,
+                SUM(guests) as total_guests
+            FROM reservations r
+            {where_clause}
+        ''', params)
+        
+        stats = cur.fetchone()
+        
+        # Get revenue by day
+        cur.execute(f'''
+            SELECT 
+                DATE(r.time_slot) as date,
+                COUNT(*) as reservations,
+                COUNT(CASE WHEN status = 'fulfilled' THEN 1 END) as fulfilled,
+                COALESCE(SUM(CASE WHEN status = 'fulfilled' THEN revenue END), 0) as daily_revenue,
+                SUM(guests) as guests
+            FROM reservations r
+            {where_clause}
+            GROUP BY DATE(r.time_slot)
+            ORDER BY date DESC
+            LIMIT 30
+        ''', params)
+        
+        daily_breakdown = cur.fetchall()
+        
+        # Get revenue by table
+        cur.execute(f'''
+            SELECT 
+                r.table_number,
+                COUNT(*) as reservations,
+                COUNT(CASE WHEN status = 'fulfilled' THEN 1 END) as fulfilled,
+                COALESCE(SUM(CASE WHEN status = 'fulfilled' THEN revenue END), 0) as revenue
+            FROM reservations r
+            {where_clause}
+            GROUP BY r.table_number
+            ORDER BY revenue DESC
+        ''', params)
+        
+        table_performance = cur.fetchall()
+        
+        # Get top customers by revenue
+        cur.execute(f'''
+            SELECT 
+                c.name,
+                c.email,
+                COUNT(*) as visit_count,
+                COUNT(CASE WHEN r.status = 'fulfilled' THEN 1 END) as fulfilled_visits,
+                COALESCE(SUM(CASE WHEN r.status = 'fulfilled' THEN r.revenue END), 0) as total_spent
+            FROM customers c
+            JOIN reservations r ON c.id = r.customer_id
+            {where_clause}
+            GROUP BY c.id, c.name, c.email
+            ORDER BY total_spent DESC
+            LIMIT 10
+        ''', params)
+        
+        top_customers = cur.fetchall()
+        
+        # Get recent fulfilled reservations
+        cur.execute(f'''
+            SELECT 
+                r.id,
+                r.time_slot,
+                r.fulfilled_at,
+                r.revenue,
+                r.guests,
+                r.table_number,
+                c.name,
+                c.email
+            FROM reservations r
+            JOIN customers c ON r.customer_id = c.id
+            WHERE r.status = 'fulfilled' {'AND ' + where_clause.replace('WHERE ', '') if where_clause else ''}
+            ORDER BY r.fulfilled_at DESC
+            LIMIT 20
+        ''', params if where_clause else [])
+        
+        recent_fulfilled = cur.fetchall()
+        
+        # Format response
+        report = {
+            'success': True,
+            'period': period,
+            'date_range': {
+                'start': start_date.isoformat() if start_date else None,
+                'end': end_date.isoformat() if end_date else None
+            },
+            'summary': {
+                'total_reservations': stats[0],
+                'fulfilled': stats[1],
+                'cancelled': stats[2],
+                'pending': stats[3],
+                'total_revenue': float(stats[4]) if stats[4] else 0,
+                'average_revenue': float(stats[5]) if stats[5] else 0,
+                'highest_revenue': float(stats[6]) if stats[6] else 0,
+                'total_guests': stats[7] if stats[7] else 0,
+                'fulfillment_rate': round((stats[1] / stats[0] * 100) if stats[0] > 0 else 0, 2)
+            },
+            'daily_breakdown': [
+                {
+                    'date': day[0].isoformat() if hasattr(day[0], 'isoformat') else str(day[0]),
+                    'reservations': day[1],
+                    'fulfilled': day[2],
+                    'revenue': float(day[3]) if day[3] else 0,
+                    'guests': day[4] if day[4] else 0
+                }
+                for day in daily_breakdown
+            ],
+            'table_performance': [
+                {
+                    'table_number': table[0],
+                    'total_reservations': table[1],
+                    'fulfilled': table[2],
+                    'total_revenue': float(table[3]) if table[3] else 0
+                }
+                for table in table_performance
+            ],
+            'top_customers': [
+                {
+                    'name': customer[0],
+                    'email': customer[1],
+                    'reservation_count': customer[2],
+                    'fulfilled_visits': customer[3],
+                    'total_revenue': float(customer[4]) if customer[4] else 0
+                }
+                for customer in top_customers
+            ],
+            'recent_fulfilled': [
+                {
+                    'id': booking[0],
+                    'time_slot': booking[1].isoformat() if hasattr(booking[1], 'isoformat') else str(booking[1]),
+                    'fulfilled_at': booking[2].isoformat() if hasattr(booking[2], 'isoformat') else str(booking[2]),
+                    'revenue': float(booking[3]) if booking[3] else 0,
+                    'guests': booking[4],
+                    'table_number': booking[5],
+                    'name': booking[6],
+                    'email': booking[7]
+                }
+                for booking in recent_fulfilled
+            ]
+        }
+        
+        return jsonify(report)
+        
+    except Exception as e:
+        print(f"❌ Error generating dining report: {e}")
+        return jsonify({'error': 'Failed to generate report'}), 500
     finally:
         if cur:
             cur.close()
